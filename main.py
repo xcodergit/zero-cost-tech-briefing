@@ -248,15 +248,6 @@ def make_narration(story, index, total):
     )
 
 
-def make_narration(story, index, total):
-    title = story["title"].rstrip(".!?")
-    summary = story["summary"].strip()
-    if summary:
-        summary = summary[:240].rsplit(" ", 1)[0] if len(summary) > 240 else summary
-        return f"Tech briefing, story {index} of {total}. {title}. Here is the reported context. {summary}. Source: {story['source']}."
-    return f"Tech briefing, story {index} of {total}. {title}. Read the original report from {story['source']} for the full details."
-
-
 def load_font(size, bold=False):
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
