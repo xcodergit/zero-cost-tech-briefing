@@ -100,7 +100,11 @@ def title_similarity(left, right):
 
 def editorial_score(story, age_hours):
     source = (story["source"] + " " + story["source_domain"]).lower()
-    if "arstechnica" in source or "the verge" in source or "theverge" in source:
+    feed_host = urlparse(story.get("feed", "")).netloc.lower().removeprefix("www.")
+    if "hnrss.org" in feed_host:
+        source_points = 0
+        source_reason = "community discovery source; not treated as an editorial publisher"
+    elif "arstechnica" in source or "the verge" in source or "theverge" in source:
         source_points = 3
         source_reason = "established technology publication"
     elif "techcrunch" in source:
