@@ -102,7 +102,7 @@ def editorial_score(story, age_hours):
     source = (story["source"] + " " + story["source_domain"]).lower()
     feed_host = urlparse(story.get("feed", "")).netloc.lower().removeprefix("www.")
     if "hnrss.org" in feed_host:
-        source_points = 0
+        source_points = -2
         source_reason = "community discovery source; not treated as an editorial publisher"
     elif "arstechnica" in source or "the verge" in source or "theverge" in source:
         source_points = 3
@@ -159,6 +159,9 @@ def collect_stories():
                 summary = clean_text(entry.get("summary", "") or entry.get("description", ""))
                 summary = re.sub(r"\s+", " ", summary)
                 summary = summary[:600].rsplit(" ", 1)[0] if len(summary) > 600 else summary
+                if len(summary) < 80:
+                    logging.info("Rejected story with insufficient RSS context: %s", title)
+                    continue
                 domain = urlparse(link).netloc.lower().removeprefix("www.")
                 story = {
                     "title": title[:180], "url": link, "source": source[:100],
