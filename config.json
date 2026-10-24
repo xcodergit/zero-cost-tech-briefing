@@ -1,9 +1,13 @@
 {
   "max_age_hours": 36,
   "max_stories": 3,
+  "min_stories": 2,
+  "min_quality_score": 5,
   "feeds": [
-    "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "https://news.google.com/rss/headlines/section/topic/TECHNOLOGY?hl=en-US&gl=US&ceid=US:en",
+    "https://www.theverge.com/rss/index.xml",
     "https://feeds.arstechnica.com/arstechnica/index",
+    "https://techcrunch.com/category/artificial-intelligence/feed/",
     "https://hnrss.org/frontpage"
   ],
   "output_dir": "output"
