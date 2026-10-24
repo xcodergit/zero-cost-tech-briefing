@@ -1,0 +1,10 @@
+{
+  "max_age_hours": 36,
+  "max_stories": 3,
+  "feeds": [
+    "https://techcrunch.com/category/artificial-intelligence/feed/",
+    "https://feeds.arstechnica.com/arstechnica/index",
+    "https://hnrss.org/frontpage"
+  ],
+  "output_dir": "output"
+}
