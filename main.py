@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
+from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import urlparse
@@ -62,10 +63,78 @@ def entry_date(entry):
     return None
 
 
+def source_label(entry, link, feed_url):
+    source = entry.get("source", {})
+    label = clean_text(source.get("title", "")) if hasattr(source, "get") else ""
+    title = clean_text(entry.get("title", ""))
+    feed_host = urlparse(feed_url).netloc.lower().removeprefix("www.")
+    link_host = urlparse(link).netloc.lower().removeprefix("www.")
+    if not label and feed_host == "news.google.com" and " - " in title:
+        title, possible_source = title.rsplit(" - ", 1)
+        label = possible_source.strip()
+    if not label:
+        label = link_host if link_host and link_host != "news.google.com" else feed_host
+    return title.strip(), label.strip() or "Unknown source"
+
+
+def normalized_words(text):
+    ignored = {
+        "the", "a", "an", "and", "or", "to", "of", "in", "on", "for", "with",
+        "from", "by", "as", "at", "is", "are", "be", "how", "why", "what",
+        "this", "that", "its", "it", "after", "over", "new", "says", "will",
+    }
+    return {
+        word for word in re.findall(r"[a-z0-9]+", text.lower())
+        if len(word) > 2 and word not in ignored
+    }
+
+
+def title_similarity(left, right):
+    a, b = normalized_words(left), normalized_words(right)
+    if not a or not b:
+        return 0.0
+    overlap = len(a & b) / max(1, len(a | b))
+    sequence = SequenceMatcher(None, " ".join(sorted(a)), " ".join(sorted(b))).ratio()
+    return max(overlap, sequence)
+
+
+def editorial_score(story, age_hours):
+    source = (story["source"] + " " + story["source_domain"]).lower()
+    if "arstechnica" in source or "the verge" in source or "theverge" in source:
+        source_points = 3
+        source_reason = "established technology publication"
+    elif "techcrunch" in source:
+        source_points = 3
+        source_reason = "established technology/startup publication"
+    elif "google news" in source or "news.google.com" in source:
+        source_points = 2
+        source_reason = "news aggregator; publisher attribution checked where available"
+    elif "hnrss" in source or "hacker news" in source:
+        source_points = 0
+        source_reason = "community discovery source"
+    else:
+        source_points = 1
+        source_reason = "other publisher; review source context"
+
+    freshness_points = 3 if age_hours <= 12 else 2 if age_hours <= 24 else 1
+    summary_len = len(story["summary"])
+    context_points = 2 if summary_len >= 180 else 1 if summary_len >= 80 else 0
+    title_points = 1 if len(story["title"]) >= 28 and len(normalized_words(story["title"])) >= 5 else 0
+    penalty = 2 if re.search(r"\b(podcast|sponsored|deals roundup|weekly roundup|opinion)\b", story["title"], re.I) else 0
+    score = source_points + freshness_points + context_points + title_points - penalty
+    reasons = [source_reason, f"published within {int(age_hours)} hours"]
+    if context_points:
+        reasons.append("has a usable RSS summary")
+    if penalty:
+        reasons.append("penalized as a less suitable briefing format")
+    return score, reasons
+
+
 def collect_stories():
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=int(CONFIG.get("max_age_hours", 36)))
-    stories, seen = [], set()
+    candidates = []
+    min_score = int(CONFIG.get("min_quality_score", 5))
     for feed_url in CONFIG["feeds"]:
         logging.info("Reading feed: %s", feed_url)
         try:
@@ -73,37 +142,110 @@ def collect_stories():
             if getattr(parsed, "bozo", False):
                 logging.warning("Feed parser warning for %s: %s", feed_url, getattr(parsed, "bozo_exception", "unknown"))
             for entry in parsed.entries:
-                title = clean_text(entry.get("title", ""))
                 link = entry.get("link", "")
-                if not title or not link or not link.startswith(("https://", "http://")):
+                if not link or not link.startswith(("https://", "http://")):
                     continue
-                norm = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
-                if norm in seen:
+                title, source = source_label(entry, link, feed_url)
+                if not title or len(normalized_words(title)) < 4:
                     continue
                 published = entry_date(entry)
                 if published is None or published < cutoff or published > now + timedelta(hours=2):
                     continue
+                age_hours = max(0.0, (now - published).total_seconds() / 3600)
                 summary = clean_text(entry.get("summary", "") or entry.get("description", ""))
                 summary = re.sub(r"\s+", " ", summary)
-                summary = summary[:360].rsplit(" ", 1)[0] if len(summary) > 360 else summary
+                summary = summary[:600].rsplit(" ", 1)[0] if len(summary) > 600 else summary
                 domain = urlparse(link).netloc.lower().removeprefix("www.")
-                stories.append({
-                    "title": title[:180], "url": link, "source": domain or "Source",
-                    "published_utc": published.isoformat(), "summary": summary, "feed": feed_url,
-                })
-                seen.add(norm)
+                story = {
+                    "title": title[:180], "url": link, "source": source[:100],
+                    "source_domain": domain or urlparse(feed_url).netloc.lower(),
+                    "published_utc": published.isoformat(), "summary": summary,
+                    "feed": feed_url, "corroborating_sources": [], "corroborating_urls": [],
+                }
+                score, reasons = editorial_score(story, age_hours)
+                story["quality_score"] = score
+                story["quality_reasons"] = reasons
+                if score < min_score:
+                    logging.info("Rejected low-scoring story (%s): %s", score, story["title"])
+                    continue
+                candidates.append(story)
         except Exception as exc:
             logging.warning("Could not read feed %s: %s", feed_url, exc)
-    stories.sort(key=lambda x: x["published_utc"], reverse=True)
-    limit = max(1, min(5, int(CONFIG.get("max_stories", 3))))
-    selected = stories[:limit]
-    if not selected:
+
+    # Group likely duplicate coverage across feeds. This is a heuristic, not proof
+    # that two reports independently verify every detail.
+    candidates.sort(key=lambda item: (item["quality_score"], item["published_utc"]), reverse=True)
+    groups = []
+    for story in candidates:
+        matching = None
+        for group in groups:
+            if any(title_similarity(story["title"], member["title"]) >= 0.58 for member in group):
+                matching = group
+                break
+        if matching is None:
+            groups.append([story])
+        else:
+            matching.append(story)
+
+    ranked = []
+    for group in groups:
+        group.sort(key=lambda item: (item["quality_score"], item["published_utc"]), reverse=True)
+        representative = group[0]
+        publishers = []
+        urls = []
+        for item in group[1:]:
+            if item["source"].lower() != representative["source"].lower() and item["source"] not in publishers:
+                publishers.append(item["source"])
+                urls.append(item["url"])
+        representative["corroborating_sources"] = publishers[:4]
+        representative["corroborating_urls"] = urls[:4]
+        if publishers:
+            representative["quality_score"] += 2
+            representative["quality_reasons"].append(
+                "similar headline coverage found from another named source (heuristic corroboration)"
+            )
+        ranked.append(representative)
+
+    ranked.sort(key=lambda item: (item["quality_score"], item["published_utc"]), reverse=True)
+    limit = max(2, min(3, int(CONFIG.get("max_stories", 3))))
+    selected = []
+    source_counts = {}
+    for story in ranked:
+        source_key = story["source"].lower()
+        if source_counts.get(source_key, 0) >= 2:
+            continue
+        selected.append(story)
+        source_counts[source_key] = source_counts.get(source_key, 0) + 1
+        if len(selected) >= limit:
+            break
+
+    minimum = max(2, int(CONFIG.get("min_stories", 2)))
+    if len(selected) < minimum:
         raise RuntimeError(
-            "No recent dated stories were found. Check feed URLs or increase max_age_hours in config.json. "
-            "No video was generated to avoid fabricating news."
+            f"Quality gate: only {len(selected)} story/stories met the freshness and quality rules; "
+            f"at least {minimum} are required. No video was generated. Try again on a stronger news day "
+            "or review the RSS feeds and quality threshold in config.json."
         )
-    logging.info("Selected %d recent stories", len(selected))
+    logging.info("Quality gate selected %d stories; scores: %s", len(selected),
+                 [story["quality_score"] for story in selected])
     return selected
+
+
+def make_narration(story, index, total):
+    title = story["title"].rstrip(".!?")
+    summary = story["summary"].strip()
+    if summary:
+        summary = summary[:320].rsplit(" ", 1)[0] if len(summary) > 320 else summary
+        return (
+            f"Here is a tech story worth knowing, story {index} of {total}. "
+            f"{title}. The available report says: {summary}. "
+            f"The source is {story['source']}. Check the linked original report for full context."
+        )
+    return (
+        f"Here is a tech story worth knowing, story {index} of {total}. {title}. "
+        f"The RSS feed did not provide enough context for a detailed summary, so we are not adding "
+        f"extra claims. Read the original report from {story['source']} using the source link."
+    )
 
 
 def make_narration(story, index, total):
